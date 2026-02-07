@@ -37,25 +37,39 @@ def _ensure_model_loaded():
     print(f"[RUNPOD] Loading ACE-Step 1.5 model: {_model_config}", flush=True)
     start = time.time()
 
-    from acestep.handler import AceStepHandler
-    from acestep.llm_inference import LLMHandler
+    try:
+        from acestep.handler import AceStepHandler
+        from acestep.llm_inference import LLMHandler
 
-    _dit_handler = AceStepHandler()
-    _dit_handler.initialize_service(
-        project_root="./",
-        config_path=_model_config,
-        device="cuda",
-        use_flash_attention=False,
-        compile_model=False,
-        offload_to_cpu=False,
-        offload_dit_to_cpu=False,
-    )
+        # ACE-Step repo is at /app/acestep — project_root must point there
+        acestep_root = os.environ.get("ACESTEP_ROOT", "/app/acestep")
+        print(f"[RUNPOD] ACE-Step root: {acestep_root}", flush=True)
+        print(f"[RUNPOD] Config: {_model_config}", flush=True)
 
-    # LLM handler — create but don't initialize (cover mode skips LLM)
-    _llm_handler = LLMHandler()
+        _dit_handler = AceStepHandler()
+        _dit_handler.initialize_service(
+            project_root=acestep_root,
+            config_path=_model_config,
+            device="cuda",
+            use_flash_attention=False,
+            compile_model=False,
+            offload_to_cpu=False,
+            offload_dit_to_cpu=False,
+        )
 
-    elapsed = time.time() - start
-    print(f"[RUNPOD] Model loaded in {elapsed:.1f}s", flush=True)
+        # LLM handler — create but don't initialize (cover mode skips LLM)
+        _llm_handler = LLMHandler()
+
+        elapsed = time.time() - start
+        print(f"[RUNPOD] Model loaded in {elapsed:.1f}s", flush=True)
+
+    except Exception as e:
+        import traceback
+        print(f"[RUNPOD] FATAL: Model loading failed: {e}", flush=True)
+        traceback.print_exc()
+        _dit_handler = None
+        _llm_handler = None
+        raise RuntimeError(f"Model not fully initialized: {e}")
 
 
 # ──────────────────────────────────────────────────────────
@@ -84,7 +98,13 @@ def handler(event):
         duration: float          — actual output duration
         seed: int                — seed used (for reproducibility)
     """
-    _ensure_model_loaded()
+    try:
+        _ensure_model_loaded()
+    except Exception as e:
+        return {"error": str(e)}
+
+    if _dit_handler is None:
+        return {"error": "Model not fully initialized"}
 
     input_data = event["input"]
 

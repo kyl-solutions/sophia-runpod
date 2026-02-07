@@ -80,12 +80,13 @@ RUN if [ -d "/app/acestep/nano_vllm" ]; then \
 
 # Download model weights at build time (baked into image = faster cold-start)
 ENV ACESTEP_DOWNLOAD_SOURCE=huggingface
+WORKDIR /app/acestep
 RUN python -c "\
 from acestep.handler import AceStepHandler; \
 h = AceStepHandler(); \
-h.initialize_service(project_root='./', config_path='acestep-v15-turbo', device='cpu'); \
+h.initialize_service(project_root='/app/acestep', config_path='acestep-v15-turbo', device='cpu'); \
 print('Model downloaded successfully') \
-" || echo "Model download will happen on first run"
+" || echo "WARNING: Model download failed - will retry at runtime"
 
 # Copy handler
 WORKDIR /app
@@ -93,6 +94,7 @@ COPY handler.py /app/handler.py
 
 # Environment
 ENV ACESTEP_MODEL=acestep-v15-turbo
+ENV ACESTEP_ROOT=/app/acestep
 ENV PYTHONUNBUFFERED=1
 
 # RunPod serverless entry point
