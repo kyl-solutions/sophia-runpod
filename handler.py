@@ -1,4 +1,4 @@
-"""RunPod serverless handler for ACE-Step 1.5 Cover Mode.
+"""RunPod serverless handler for ACE-Step 1.5 Cover Mode (v2).
 
 Runs on RunPod serverless (A100/A40 GPU). Receives a job with:
   - reference_audio (base64 WAV)
