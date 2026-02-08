@@ -24,15 +24,19 @@ import runpod
 _dit_handler = None
 _llm_handler = None
 _model_loaded = False
+_model_error = None  # Store error details for API response
 _model_config = os.environ.get("ACESTEP_MODEL", "acestep-v15-turbo")
 
 
 def _load_model():
-    """Load model onto GPU. Called once on first real job."""
-    global _dit_handler, _llm_handler, _model_loaded
+    """Load model onto GPU. Called once on first real job.
+
+    Returns (True, None) on success or (False, error_string) on failure.
+    """
+    global _dit_handler, _llm_handler, _model_loaded, _model_error
 
     if _model_loaded:
-        return True
+        return True, None
 
     acestep_root = os.environ.get("ACESTEP_ROOT", "/app/acestep")
 
@@ -42,12 +46,25 @@ def _load_model():
     print(f"[SOPHIA]   root:   {acestep_root}", flush=True)
     print(f"[SOPHIA]   device: cuda", flush=True)
 
+    # Check CUDA availability
+    try:
+        import torch
+        print(f"[SOPHIA]   torch:  {torch.__version__}", flush=True)
+        print(f"[SOPHIA]   cuda:   {torch.cuda.is_available()}", flush=True)
+        if torch.cuda.is_available():
+            print(f"[SOPHIA]   gpu:    {torch.cuda.get_device_name(0)}", flush=True)
+            print(f"[SOPHIA]   vram:   {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB", flush=True)
+    except Exception as te:
+        print(f"[SOPHIA]   torch check failed: {te}", flush=True)
+
     if os.path.exists(acestep_root):
         contents = os.listdir(acestep_root)
         print(f"[SOPHIA]   files:  {contents[:15]}", flush=True)
     else:
-        print(f"[SOPHIA]   ERROR: root dir missing!", flush=True)
-        return False
+        msg = f"ACESTEP_ROOT dir missing: {acestep_root}"
+        print(f"[SOPHIA]   ERROR: {msg}", flush=True)
+        _model_error = msg
+        return False, msg
 
     start = time.time()
 
@@ -73,8 +90,10 @@ def _load_model():
         print(f"[SOPHIA] DiT msg: {status_msg}", flush=True)
 
         if not success:
-            print("[SOPHIA] FATAL: DiT init failed!", flush=True)
-            return False
+            msg = f"DiT init failed: {status_msg}"
+            print(f"[SOPHIA] FATAL: {msg}", flush=True)
+            _model_error = msg
+            return False, msg
 
         _llm_handler = LLMHandler()
         _model_loaded = True
@@ -82,12 +101,14 @@ def _load_model():
         elapsed = time.time() - start
         print(f"[SOPHIA] Model loaded in {elapsed:.1f}s", flush=True)
         print("[SOPHIA] ════════════════════════════════════════", flush=True)
-        return True
+        return True, None
 
     except Exception as e:
-        print(f"[SOPHIA] Model load error: {e}", flush=True)
+        msg = f"Model load exception: {str(e)}"
+        print(f"[SOPHIA] {msg}", flush=True)
         traceback.print_exc()
-        return False
+        _model_error = msg
+        return False, msg
 
 
 # ──────────────────────────────────────────────────────────
@@ -111,8 +132,9 @@ def handler(job):
     # ── Load model on first real job ──
     if not _model_loaded:
         print("[SOPHIA] First real job — loading model...", flush=True)
-        if not _load_model():
-            return {"error": "Model failed to load"}
+        ok, err = _load_model()
+        if not ok:
+            return {"error": f"Model failed to load: {err}"}
 
     # ── Extract parameters ──
     reference_audio_b64 = input_data.get("reference_audio", "")
