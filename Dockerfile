@@ -71,7 +71,8 @@ RUN pip install --no-cache-dir --no-deps -e . && \
     torchcodec \
     safetensors \
     huggingface_hub \
-    uvicorn
+    uvicorn \
+    vector_quantize_pytorch
 
 # Install nano-vllm (bundled in ACE-Step repo)
 RUN if [ -d "/app/acestep/nano_vllm" ]; then \
