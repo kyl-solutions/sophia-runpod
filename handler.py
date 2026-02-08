@@ -36,8 +36,8 @@ def _ensure_model_loaded():
     if _dit_handler is not None:
         return
 
-    if _init_error is not None:
-        raise RuntimeError(f"Previous init failed: {_init_error}")
+    # Don't permanently block on previous failure — retry each time
+    # (model download may have been a transient network issue)
 
     acestep_root = os.environ.get("ACESTEP_ROOT", "/app/acestep")
 
@@ -220,13 +220,10 @@ def handler(event):
 # ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Try to pre-load at startup, but don't crash if it fails —
-    # the handler will retry and return errors per-job instead.
-    try:
-        _ensure_model_loaded()
-        print("[RUNPOD] Startup model pre-load: SUCCESS", flush=True)
-    except Exception as e:
-        print(f"[RUNPOD] Startup model pre-load FAILED (will retry per-job): {e}", flush=True)
-
-    # Always start the handler — even if model init failed
+    # IMPORTANT: Start the RunPod handler IMMEDIATELY so the worker
+    # registers with the queue. Model loading happens lazily on the
+    # first job via _ensure_model_loaded() in handler().
+    # If we pre-load here, the model download/init can block for
+    # minutes and RunPod never sees the worker as "ready".
+    print("[RUNPOD] Starting handler (model loads on first job)...", flush=True)
     runpod.serverless.start({"handler": handler})
