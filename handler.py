@@ -1,17 +1,11 @@
-"""RunPod serverless handler for ACE-Step 1.5 Cover Mode (v6).
+"""RunPod serverless handler for ACE-Step 1.5 Cover Mode (v7).
 
-Runs on RunPod serverless (RTX 4090 / A100 GPU). Receives a job with:
-  - reference_audio (base64 WAV)
-  - prompt, lyrics, audio_cover_strength, inference_steps, etc.
+v7: Diagnostic build — echo handler first to verify RunPod queue connectivity,
+then model loading + full generation if echo works.
 
-Returns base64-encoded WAV audio.
-
-Cover mode skips the LLM entirely — only the DiT model is needed (~4GB VRAM).
-
-IMPORTANT: Model is pre-loaded at startup BEFORE runpod.serverless.start().
-This means the worker stays in "initializing" state until the model is on GPU,
-then transitions to "idle/ready" and starts accepting jobs.
-If model init fails, we sys.exit(1) so RunPod restarts the container.
+Two-phase startup:
+  Phase 1: Register handler immediately (proves queue works)
+  Phase 2: Load model on first real job (not echo/ping)
 """
 
 import base64
@@ -24,78 +18,101 @@ import traceback
 import runpod
 
 # ──────────────────────────────────────────────────────────
-# Model loading — happens once at container startup
+# Global state
 # ──────────────────────────────────────────────────────────
 
 _dit_handler = None
 _llm_handler = None
+_model_loaded = False
 _model_config = os.environ.get("ACESTEP_MODEL", "acestep-v15-turbo")
 
 
 def _load_model():
-    """Load model onto GPU. Called once at startup before handler starts."""
-    global _dit_handler, _llm_handler
+    """Load model onto GPU. Called once on first real job."""
+    global _dit_handler, _llm_handler, _model_loaded
+
+    if _model_loaded:
+        return True
 
     acestep_root = os.environ.get("ACESTEP_ROOT", "/app/acestep")
 
-    print("[SOPHIA-RUNPOD] ════════════════════════════════════════", flush=True)
-    print("[SOPHIA-RUNPOD] Loading ACE-Step 1.5 model...", flush=True)
-    print(f"[SOPHIA-RUNPOD]   config: {_model_config}", flush=True)
-    print(f"[SOPHIA-RUNPOD]   root:   {acestep_root}", flush=True)
-    print(f"[SOPHIA-RUNPOD]   device: cuda", flush=True)
+    print("[SOPHIA] ════════════════════════════════════════", flush=True)
+    print("[SOPHIA] Loading ACE-Step 1.5 model...", flush=True)
+    print(f"[SOPHIA]   config: {_model_config}", flush=True)
+    print(f"[SOPHIA]   root:   {acestep_root}", flush=True)
+    print(f"[SOPHIA]   device: cuda", flush=True)
 
-    # Debug: show root dir contents
     if os.path.exists(acestep_root):
         contents = os.listdir(acestep_root)
-        print(f"[SOPHIA-RUNPOD]   files:  {contents[:15]}", flush=True)
+        print(f"[SOPHIA]   files:  {contents[:15]}", flush=True)
     else:
-        print(f"[SOPHIA-RUNPOD]   ERROR: root dir missing!", flush=True)
-        sys.exit(1)
+        print(f"[SOPHIA]   ERROR: root dir missing!", flush=True)
+        return False
 
     start = time.time()
 
-    from acestep.handler import AceStepHandler
-    from acestep.llm_inference import LLMHandler
+    try:
+        from acestep.handler import AceStepHandler
+        from acestep.llm_inference import LLMHandler
 
-    print("[SOPHIA-RUNPOD] Creating AceStepHandler...", flush=True)
-    _dit_handler = AceStepHandler()
+        print("[SOPHIA] Creating AceStepHandler...", flush=True)
+        _dit_handler = AceStepHandler()
 
-    print("[SOPHIA-RUNPOD] Calling initialize_service...", flush=True)
-    status_msg, success = _dit_handler.initialize_service(
-        project_root=acestep_root,
-        config_path=_model_config,
-        device="cuda",
-        use_flash_attention=False,
-        compile_model=False,
-        offload_to_cpu=False,
-        offload_dit_to_cpu=False,
-    )
+        print("[SOPHIA] Calling initialize_service...", flush=True)
+        status_msg, success = _dit_handler.initialize_service(
+            project_root=acestep_root,
+            config_path=_model_config,
+            device="cuda",
+            use_flash_attention=False,
+            compile_model=False,
+            offload_to_cpu=False,
+            offload_dit_to_cpu=False,
+        )
 
-    print(f"[SOPHIA-RUNPOD] DiT result: success={success}", flush=True)
-    print(f"[SOPHIA-RUNPOD] DiT msg: {status_msg}", flush=True)
+        print(f"[SOPHIA] DiT result: success={success}", flush=True)
+        print(f"[SOPHIA] DiT msg: {status_msg}", flush=True)
 
-    if not success:
-        print(f"[SOPHIA-RUNPOD] FATAL: DiT init failed!", flush=True)
-        sys.exit(1)
+        if not success:
+            print("[SOPHIA] FATAL: DiT init failed!", flush=True)
+            return False
 
-    # LLM handler — create but don't fully init (cover mode skips LLM)
-    _llm_handler = LLMHandler()
+        _llm_handler = LLMHandler()
+        _model_loaded = True
 
-    elapsed = time.time() - start
-    print(f"[SOPHIA-RUNPOD] Model loaded in {elapsed:.1f}s", flush=True)
-    print("[SOPHIA-RUNPOD] ════════════════════════════════════════", flush=True)
+        elapsed = time.time() - start
+        print(f"[SOPHIA] Model loaded in {elapsed:.1f}s", flush=True)
+        print("[SOPHIA] ════════════════════════════════════════", flush=True)
+        return True
+
+    except Exception as e:
+        print(f"[SOPHIA] Model load error: {e}", flush=True)
+        traceback.print_exc()
+        return False
 
 
 # ──────────────────────────────────────────────────────────
 # Handler — called per job
 # ──────────────────────────────────────────────────────────
 
-def handler(event):
+def handler(job):
     """RunPod serverless handler for ACE-Step 1.5 cover mode generation."""
-    if _dit_handler is None:
-        return {"error": "Model not loaded (should not happen)"}
+    input_data = job["input"]
 
-    input_data = event["input"]
+    # ── Echo/ping mode — test queue connectivity ──
+    if input_data.get("ping"):
+        print("[SOPHIA] PING received — queue is working!", flush=True)
+        return {
+            "pong": True,
+            "model_loaded": _model_loaded,
+            "timestamp": time.time(),
+            "version": "v7",
+        }
+
+    # ── Load model on first real job ──
+    if not _model_loaded:
+        print("[SOPHIA] First real job — loading model...", flush=True)
+        if not _load_model():
+            return {"error": "Model failed to load"}
 
     # ── Extract parameters ──
     reference_audio_b64 = input_data.get("reference_audio", "")
@@ -121,7 +138,7 @@ def handler(event):
         f.write(base64.b64decode(reference_audio_b64))
 
     file_size = os.path.getsize(ref_path)
-    print(f"[SOPHIA-RUNPOD] Job received: strength={audio_cover_strength} "
+    print(f"[SOPHIA] Job received: strength={audio_cover_strength} "
           f"steps={inference_steps} bpm={bpm} key={key_scale} "
           f"duration={duration}s ref_size={file_size}B", flush=True)
 
@@ -163,7 +180,7 @@ def handler(event):
         )
 
         elapsed = time.time() - start_time
-        print(f"[SOPHIA-RUNPOD] Generation done in {elapsed:.1f}s", flush=True)
+        print(f"[SOPHIA] Generation done in {elapsed:.1f}s", flush=True)
 
         if not result.success:
             return {"error": f"Generation failed: {result.error}"}
@@ -182,7 +199,7 @@ def handler(event):
             audio_b64 = base64.b64encode(f.read()).decode()
 
         output_size = os.path.getsize(audio_path)
-        print(f"[SOPHIA-RUNPOD] Output: {output_size} bytes, {elapsed:.1f}s", flush=True)
+        print(f"[SOPHIA] Output: {output_size} bytes, {elapsed:.1f}s", flush=True)
 
         return {
             "audio_b64": audio_b64,
@@ -204,23 +221,9 @@ def handler(event):
 
 
 # ──────────────────────────────────────────────────────────
-# Entry point
+# Entry point — register immediately, no pre-loading
 # ──────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    print("[SOPHIA-RUNPOD] Container starting...", flush=True)
-
-    # Pre-load model BEFORE registering with RunPod queue.
-    # Worker stays in "initializing" state during this time.
-    # Once done, runpod.serverless.start() registers it as "ready".
-    # If model fails → sys.exit(1) → RunPod restarts container.
-    try:
-        _load_model()
-    except Exception as e:
-        print(f"[SOPHIA-RUNPOD] FATAL: {e}", flush=True)
-        traceback.print_exc()
-        sys.exit(1)
-
-    # Model loaded — now register with RunPod queue
-    print("[SOPHIA-RUNPOD] Registering with RunPod queue...", flush=True)
-    runpod.serverless.start({"handler": handler})
+print("[SOPHIA] v7 handler starting...", flush=True)
+print("[SOPHIA] Registering with RunPod queue (no pre-load)...", flush=True)
+runpod.serverless.start({"handler": handler})
